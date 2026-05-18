@@ -1,0 +1,21 @@
+[project]
+name = "freebie-hunter"
+version = "1.0.0"
+description = "Autonomous free sample discovery, email generation, and tracking system"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "rich>=13.0.0",
+    "playwright>=1.40.0",
+]
+
+[project.scripts]
+freebie-hunter = "freebie_hunter.main:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["freebie_hunter*"]
