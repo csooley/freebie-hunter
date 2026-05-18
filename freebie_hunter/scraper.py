@@ -744,6 +744,7 @@ ALL_SCRAPERS = [
     ("reddit_freebies_canada", scrape_reddit_freebies_canada),
     ("reddit_freebies", scrape_reddit_freebies),
     ("slickdeals", scrape_slickdeals),
+    ("direct_search", "lazy:freebie_hunter.search_discovery.scrape_direct_search"),
 ]
 
 CONTEST_SCRAPERS = [
@@ -763,11 +764,13 @@ def scrape_all(sources: list[str] = None, offer_type: str = "all") -> list[dict]
         sources: Optional list of source keys to scrape. If None, scrape all.
                  Valid keys: canadian_free_stuff, freebies_canada,
                  reddit_freebies_canada, reddit_freebies, slickdeals,
-                 contest_canada, sweepstakes_ca, reddit_canadian_contests,
-                 sweepstakes_advantage
+                 direct_search, contest_canada, sweepstakes_ca,
+                 reddit_canadian_contests, sweepstakes_advantage
         offer_type: 'freebie', 'contest', or 'all' (default). Determines
                     which set of scrapers to run.
     """
+    import importlib
+
     # Determine which scrapers to run
     if offer_type == "freebie":
         scrapers_to_run = ALL_SCRAPERS
@@ -782,6 +785,13 @@ def scrape_all(sources: list[str] = None, offer_type: str = "all") -> list[dict]
         if sources and source_key not in sources:
             continue
         try:
+            # Handle lazy imports: if scraper_fn is a string like
+            # "lazy:module.function", import and resolve it
+            if isinstance(scraper_fn, str) and scraper_fn.startswith("lazy:"):
+                module_path, func_name = scraper_fn[5:].rsplit(".", 1)
+                module = importlib.import_module(module_path)
+                scraper_fn = getattr(module, func_name)
+
             offers = scraper_fn()
             all_offers.extend(offers)
         except Exception as e:

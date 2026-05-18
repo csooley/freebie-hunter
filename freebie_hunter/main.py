@@ -20,6 +20,7 @@ from freebie_hunter.database import (
 )
 from freebie_hunter.scraper import scrape_all
 from freebie_hunter.filter import filter_and_score
+from freebie_hunter.search_discovery import search_discover
 from freebie_hunter.digest import (
     format_terminal,
     format_discord,
@@ -370,6 +371,82 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_search(args) -> int:
+    """Run search-based discovery (brand portals + DDG queries)."""
+    from rich.console import Console
+
+    console = Console()
+    logger = logging.getLogger(__name__)
+
+    use_portals = args.portals or (not args.portals and not args.queries)
+    use_queries = args.queries or (not args.portals and not args.queries)
+
+    mode_parts = []
+    if use_portals:
+        mode_parts.append("brand portals")
+    if use_queries:
+        mode_parts.append("search queries")
+    mode_str = " + ".join(mode_parts)
+
+    console.print(f"[bold blue]🔍 Freebie Hunter - Search Discovery ({mode_str})[/bold blue]\n")
+
+    start = time.time()
+
+    try:
+        raw_offers = search_discover(use_portals=use_portals, use_queries=use_queries)
+    except Exception as e:
+        console.print(f"[red]Search discovery failed: {e}[/red]")
+        logger.exception("search_discover failed")
+        return 1
+
+    if not raw_offers:
+        console.print("[yellow]No offers found via search discovery.[/yellow]")
+        return 0
+
+    # Filter and score
+    filtered = filter_and_score(raw_offers, min_score=30)
+    logger.info(f"After filtering: {len(filtered)}")
+
+    # Save to database
+    new_count = 0
+    for offer in filtered:
+        offer_id = insert_offer(offer)
+        if offer_id:
+            offer["id"] = offer_id
+            new_count += 1
+
+    elapsed = time.time() - start
+
+    # Log the run
+    log_run(
+        offers_found=len(filtered),
+        offers_claimed=0,
+        duration_seconds=elapsed,
+    )
+
+    # Output
+    if args.json:
+        print(format_json(filtered))
+    else:
+        if filtered:
+            for offer in filtered:
+                if "status" not in offer:
+                    offer["status"] = "new"
+            output = format_terminal(filtered, title=f"Search Discovery — {len(filtered)} offers ({elapsed:.1f}s)")
+            console.print(output)
+        else:
+            console.print("[yellow]No new offers found after filtering.[/yellow]")
+
+    # Show summary
+    stats = get_stats()
+    console.print(
+        f"\n[dim]💾 Database: {stats['total']} total | {new_count} new | "
+        f"sources: {mode_str}[/dim]"
+    )
+
+    return 0
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -444,6 +521,12 @@ Examples:
     claim_pending_parser = subparsers.add_parser("claim-pending", help="Claim all pending (new) offers, skipping CAPTCHA")
     claim_pending_parser.add_argument("--limit", type=int, default=50, help="Max offers to claim (default: 50)")
 
+    # search
+    search_parser = subparsers.add_parser("search", help="Run search-based discovery (brand portals + DDG queries)")
+    search_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    search_parser.add_argument("--portals", action="store_true", help="Only check brand portals")
+    search_parser.add_argument("--queries", action="store_true", help="Only run search queries")
+
     args = parser.parse_args()
 
     # Setup logging
@@ -463,6 +546,7 @@ Examples:
     # Route to command
     commands = {
         "scan": cmd_scan,
+        "search": cmd_search,
         "claim": cmd_claim,
         "full": cmd_full,
         "claim-pending": cmd_claim_pending,
