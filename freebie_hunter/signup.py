@@ -5,7 +5,7 @@ import re
 import time
 from typing import Optional
 
-from freebie_hunter.config import PROFILE
+from freebie_hunter.config import get_profile
 from freebie_hunter.email_gen import GuerrillaMail
 
 logger = logging.getLogger(__name__)
@@ -198,7 +198,7 @@ def signup_offer(
     from playwright.sync_api import sync_playwright
 
     if profile is None:
-        profile = PROFILE
+        profile = get_profile() or {}
 
     result = {
         "success": False,
