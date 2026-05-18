@@ -5,7 +5,7 @@ import re
 import time
 from typing import Optional
 
-from freebie_hunter.config import get_profile
+from freebie_hunter.config import get_profile, CONTEST_EMAIL, STQ_PATTERNS
 from freebie_hunter.email_gen import GuerrillaMail
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,9 @@ FIELD_PATTERNS = {
     "phone": [r"phone", r"telephone", r"mobile", r"cell", r"tel"],
     "birth_date": [r"birth", r"dob", r"date.?of.?birth"],
     "gender": [r"gender", r"sex"],
+    "age_verify": [r"age", r"over[\s-]*\d+", r"years[\s-]*old"],
+    "skill_test": [r"skill", r"stq", r"math", r"answer"],
+    "province_select": [r"province", r"state", r"region"],
 }
 
 
@@ -178,19 +181,133 @@ def _detect_submit_button(page):
     return None
 
 
+def solve_stq(page) -> bool:
+    """Detect and solve a Canadian skill-testing math question on the page.
+
+    Looks for text like 'What is 15 x 4 + 12?' or 'Skill-testing question: (8 * 3) - 5'
+    Parses the arithmetic, computes answer, fills the answer field.
+    Returns True if STQ was found and solved.
+    """
+    try:
+        page_text = page.content().lower()
+    except Exception:
+        return False
+
+    # Check if any STQ pattern matches
+    found_pattern = False
+    for pattern in STQ_PATTERNS:
+        if re.search(pattern, page_text, re.IGNORECASE):
+            found_pattern = True
+            break
+    if not found_pattern:
+        return False
+
+    logger.info("Skill-testing question detected, attempting to solve...")
+
+    # Extract math expression: handles "X * Y + Z", "X x Y + Z - W", "X multiplied by Y plus Z"
+    # First try standard arithmetic form
+    expr_match = re.search(
+        r"(\d+)\s*[\*\u00d7x]\s*(\d+)\s*[\+\-]\s*(\d+)(?:\s*[\+\-]\s*(\d+))?",
+        page_text, re.IGNORECASE
+    )
+    if not expr_match:
+        # Try word form: "X multiplied by Y plus Z"
+        expr_match = re.search(
+            r"(\d+)\s*(?:multiplied\s*by|times)\s*(\d+)\s*(?:plus|add)\s*(\d+)(?:\s*(?:minus|subtract)\s*(\d+))?",
+            page_text, re.IGNORECASE
+        )
+
+    if not expr_match:
+        logger.debug("Could not extract math expression from STQ")
+        return False
+
+    groups = expr_match.groups()
+    a = int(groups[0])
+    b = int(groups[1])
+    c = int(groups[2])
+    d = int(groups[3]) if groups[3] else None
+
+    # Compute with BODMAS: multiplication first, then left-to-right for +/-
+    result = a * b
+
+    # Determine the first operator (+ or -) between the multiplication and next num
+    full_expr = expr_match.group(0)
+    op_match = re.search(r"[*x\u00d7]\s*\d+\s*([+\-])", full_expr, re.IGNORECASE)
+    first_op = op_match.group(1) if op_match else "+"
+
+    if first_op == "+":
+        result += c
+    else:
+        result -= c
+
+    if d is not None:
+        op_match2 = re.search(rf"{c}\s*([+\-])\s*{d}", full_expr)
+        second_op = op_match2.group(1) if op_match2 else "+"
+        if second_op == "+":
+            result += d
+        else:
+            result -= d
+
+    logger.info(f"STQ: computed answer = {result}")
+
+    # Find the answer input field and fill it
+    answer_str = str(result)
+    try:
+        # Try finding input near the STQ text by looking at inputs on page
+        all_inputs = page.locator("input[type='text'], input:not([type])")
+        for i in range(min(all_inputs.count(), 30)):
+            try:
+                el = all_inputs.nth(i)
+                name = (el.get_attribute("name") or "").lower()
+                id_attr = (el.get_attribute("id") or "").lower()
+                placeholder = (el.get_attribute("placeholder") or "").lower()
+                combined = f"{name} {id_attr} {placeholder}"
+
+                # Look for skill/math/answer related field names
+                if any(kw in combined for kw in ["answer", "skill", "math", "stq", "result", "solution"]):
+                    el.click()
+                    el.fill("")
+                    el.type(answer_str, delay=50)
+                    logger.info(f"STQ: filled answer '{answer_str}' into field '{name or id_attr}'")
+                    return True
+            except Exception:
+                continue
+
+        # Fallback: try to find the input closest to the STQ text
+        for i in range(min(all_inputs.count(), 30)):
+            try:
+                el = all_inputs.nth(i)
+                el.click()
+                el.fill("")
+                el.type(answer_str, delay=50)
+                logger.info(f"STQ: filled answer '{answer_str}' into fallback field")
+                return True
+            except Exception:
+                continue
+
+        logger.warning("STQ: could not find answer input field")
+    except Exception as e:
+        logger.warning(f"STQ: error filling answer: {e}")
+
+    return True  # We found and solved the math, even if filling failed
+
+
 def signup_offer(
     offer_url: str,
     email_address: str = None,
     profile: dict = None,
     dry_run: bool = False,
+    email_type: str = "disposable",
 ) -> dict:
     """Attempt to sign up for an offer using Playwright.
 
     Args:
         offer_url: URL of the offer signup page.
-        email_address: Email to use. If None, generates one via Guerrilla Mail.
+        email_address: Email to use. If None, generates one via Guerrilla Mail
+                       (when email_type='disposable') or uses CONTEST_EMAIL.
         profile: Dict with profile data. If None, uses config.PROFILE.
         dry_run: If True, don't actually submit.
+        email_type: 'disposable' (Guerrilla Mail) or 'persistent' (CONTEST_EMAIL).
 
     Returns:
         Dict with: success, email_used, captcha_detected, error, confirmation_text
@@ -211,14 +328,19 @@ def signup_offer(
     # Generate email if needed
     gm = None
     if not email_address:
-        try:
-            gm = GuerrillaMail()
-            email_address = gm.get_email_address()
+        if email_type == "persistent":
+            email_address = CONTEST_EMAIL
             result["email_used"] = email_address
-            logger.info(f"Generated email: {email_address}")
-        except Exception as e:
-            result["error"] = f"Failed to generate email: {e}"
-            return result
+            logger.info(f"Using persistent email: {email_address}")
+        else:
+            try:
+                gm = GuerrillaMail()
+                email_address = gm.get_email_address()
+                result["email_used"] = email_address
+                logger.info(f"Generated email: {email_address}")
+            except Exception as e:
+                result["error"] = f"Failed to generate email: {e}"
+                return result
 
     logger.info(f"Attempting signup for: {offer_url}")
     logger.info(f"Using email: {email_address}")
@@ -301,6 +423,11 @@ def signup_offer(
                 _fill_field(page, FIELD_PATTERNS["phone"], profile["phone"])
 
             logger.info(f"Filled {field_fill_count} fields")
+
+            # Attempt to solve any skill-testing question (Canadian law requirement for contests)
+            stq_solved = solve_stq(page)
+            if stq_solved:
+                logger.info("Skill-testing question handled")
 
             # Submit the form
             if not dry_run:

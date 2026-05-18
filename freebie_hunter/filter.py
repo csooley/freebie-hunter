@@ -1,6 +1,7 @@
 """Filtering, deduplication, and scoring for freebie offers."""
 
 import logging
+import re
 from typing import Optional
 
 from freebie_hunter.config import CANADA_KEYWORDS, WORLDWIDE_KEYWORDS
@@ -58,7 +59,13 @@ def score_offer(offer: dict) -> int:
     - Has description: +10
     - Category bonus for beauty/health: +10
     - Exploit potential: +25
+
+    Contest-specific:
+    - Cash prizes: base score from dollar amount
+    - Daily entry: +15 bonus
+    - Weekly entry: +10 bonus
     """
+    offer_type = offer.get("offer_type", "freebie")
     score = 0
     region = (offer.get("region") or "").lower()
     text = f"{(offer.get('title') or '').lower()} {(offer.get('description') or '').lower()}"
@@ -77,7 +84,9 @@ def score_offer(offer: dict) -> int:
         score += 20
         try:
             amount = float(value.replace("$", "").replace(",", ""))
-            if amount >= 10:
+            if offer_type == "contest" and amount >= 100:
+                score += 50  # Big contest prize
+            elif amount >= 10:
                 score += 30
             elif amount >= 5:
                 score += 15
@@ -89,13 +98,26 @@ def score_offer(offer: dict) -> int:
         score += 10
 
     # Category bonuses
-    high_value_cats = {"beauty", "health", "food"}
-    if offer.get("category", "") in high_value_cats:
-        score += 10
+    if offer_type == "contest":
+        # Contest categories that are particularly exciting
+        high_value_contest_cats = {"cash", "travel", "car", "electronics"}
+        if offer.get("category", "") in high_value_contest_cats:
+            score += 15
+    else:
+        high_value_cats = {"beauty", "health", "food"}
+        if offer.get("category", "") in high_value_cats:
+            score += 10
 
     # Exploit detection
     if detect_exploit(offer):
         score += 25
+
+    # Contest entry frequency bonus
+    if offer_type == "contest":
+        if re.search(r"daily|every\s*day|once\s*(?:a|per)\s*day", text):
+            score += 15
+        elif re.search(r"weekly|once\s*(?:a|per)\s*week", text):
+            score += 10
 
     return score
 
@@ -161,26 +183,13 @@ def filter_low_value(offer: dict) -> bool:
             return True  # Definitely keep
 
     # --- Contest/sweepstakes: keep if prize seems substantial ---
-    contest_indicators = [r"\bcontest\b", r"\bsweepstakes\b", r"\bgiveaway\b", r"\benter to win\b", r"\bwin\b"]
-    is_contest = any(re.search(p, text) for p in contest_indicators)
+    contest_indicators = [r"\\bcontest\\b", r"\\bsweepstakes\\b", r"\\bgiveaway\\b", r"\\benter to win\\b", r"\\bwin\\b"]
+    is_contest = offer.get("offer_type") == "contest" or any(re.search(p, text) for p in contest_indicators)
     if is_contest:
-        # Look for prize value indicators
-        value = (offer.get("value_estimate") or "").replace("$", "").replace(",", "")
-        try:
-            if value and float(value) >= 50:
-                return True
-        except ValueError:
-            pass
-        # Check for prize keywords: cash, gift card, product prize, trip, etc.
-        prize_keywords = [
-            r"\bcash prize\b", r"\bgift card\b", r"\bgiftcard\b", r"\bprize pack\b",
-            r"\bwin a\b", r"\btrip to\b", r"\bvacation\b", r"\bconcert tickets\b",
-            r"\bproduct giveaway\b", r"\bprize worth\b", r"\bvalued at\s*\$\d+\b",
-        ]
-        for pk in prize_keywords:
-            if re.search(pk, text):
-                return True
-        # Contest with no clear prize info — skip
+        # Contests are always valid — just check it's not complete junk
+        # If it has a title and isn't pure navigation, keep it
+        if title and len(title) > 3:
+            return True
         return False
 
     # --- Coupon: keep if high-value ---

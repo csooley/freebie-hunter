@@ -30,6 +30,29 @@ SLICKDEALS_FREEBIES = "https://slickdeals.net/deals/freebies/"
 # Guerrilla Mail API
 GUERRILLA_API = "https://api.guerrillamail.com/ajax.php"
 
+# Contest aggregation sites
+CONTEST_CANADA = "https://contestcanada.net/"
+SWEEPSTAKES_CA = "https://sweepstakes.ca/"
+REDDIT_CANADIAN_CONTESTS = "https://old.reddit.com/r/CanadianContests/new/.json"
+SWEEPSTAKES_ADVANTAGE = "https://www.sweepstakesadvantage.com/"
+CONTEST_GIRL = "https://www.contestgirl.com/"
+
+# Contest-specific categories (extends freebie categories)
+CONTEST_CATEGORIES = ["cash", "travel", "electronics", "giftcard", "car", "home", "fashion", "sports", "food_drink"]
+
+# Persistent email for contest entries
+CONTEST_EMAIL = "Jaysfan148@gmail.com"
+
+# Skill-testing question patterns (Canadian law requirement)
+STQ_PATTERNS = [
+    r"skill[\s-]*testing[\s-]*question",
+    r"skill[\s-]*test",
+    r"stq",
+    r"mathematical[\s-]*question",
+    r"math[\s-]*question",
+    r"what\s+is\s+\d+",
+]
+
 # Category keywords for inference
 CATEGORY_KEYWORDS = {
     "beauty": ["beauty", "makeup", "skincare", "cosmetic", "lipstick", "mascara", "lotion", "cream", "perfume", "fragrance", "shampoo", "conditioner", "nail", "face wash", "moisturizer"],

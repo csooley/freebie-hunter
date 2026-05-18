@@ -37,6 +37,7 @@ def init_db() -> None:
                 value_estimate TEXT,
                 email_used TEXT,
                 status TEXT DEFAULT 'new',
+                offer_type TEXT DEFAULT 'freebie',
                 discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 claimed_at TIMESTAMP,
                 shipped_at TIMESTAMP,
@@ -65,6 +66,7 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_offers_status ON offers(status);
             CREATE INDEX IF NOT EXISTS idx_offers_source ON offers(source);
             CREATE INDEX IF NOT EXISTS idx_offers_category ON offers(category);
+            CREATE INDEX IF NOT EXISTS idx_offers_type ON offers(offer_type);
         """)
         conn.commit()
     finally:
@@ -114,8 +116,8 @@ def insert_offer(offer: dict) -> Optional[int]:
     conn = get_connection()
     try:
         conn.execute("""
-            INSERT OR IGNORE INTO offers (source, url, title, description, category, region, value_estimate)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO offers (source, url, title, description, category, region, value_estimate, offer_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             offer.get("source", ""),
             offer.get("url", ""),
@@ -124,6 +126,7 @@ def insert_offer(offer: dict) -> Optional[int]:
             offer.get("category", "other"),
             offer.get("region", "unknown"),
             offer.get("value_estimate", ""),
+            offer.get("offer_type", "freebie"),
         ))
         conn.commit()
         cur = conn.execute("SELECT id FROM offers WHERE url = ?", (offer.get("url", ""),))
@@ -225,10 +228,14 @@ def get_stats() -> dict:
         cur = conn.execute("SELECT source, COUNT(*) as cnt FROM offers GROUP BY source ORDER BY cnt DESC")
         sources = {row["source"]: row["cnt"] for row in cur.fetchall()}
 
+        cur = conn.execute("SELECT offer_type, COUNT(*) as cnt FROM offers GROUP BY offer_type ORDER BY cnt DESC")
+        types = {row["offer_type"]: row["cnt"] for row in cur.fetchall()}
+
         return {
             "by_status": stats,
             "by_category": categories,
             "by_source": sources,
+            "by_type": types,
             "total": sum(stats.values()),
         }
     finally:

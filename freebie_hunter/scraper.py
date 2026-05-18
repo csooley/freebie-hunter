@@ -25,7 +25,13 @@ from freebie_hunter.config import (
     CANADIAN_FREE_STUFF,
     FREEBIES_CANADA,
     SLICKDEALS_FREEBIES,
+    CONTEST_CANADA,
+    SWEEPSTAKES_CA,
+    REDDIT_CANADIAN_CONTESTS,
+    SWEEPSTAKES_ADVANTAGE,
+    CONTEST_GIRL,
     CATEGORY_KEYWORDS,
+    CONTEST_CATEGORIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -432,6 +438,304 @@ def scrape_slickdeals() -> list[dict]:
     return offers
 
 
+# --- Contest/Sweepstakes scrapers ---
+
+def _infer_contest_category(text: str) -> str:
+    """Infer contest category from text."""
+    if not text:
+        return "other"
+    text_lower = text.lower()
+    cat_keywords = {
+        "cash": ["cash", "money", "dollars", "paypal"],
+        "travel": ["travel", "trip", "vacation", "flight", "hotel", "cruise", "resort"],
+        "electronics": ["iphone", "ipad", "laptop", "tv", "xbox", "playstation", "nintendo", "switch", "headphones", "camera", "speaker", "drone"],
+        "giftcard": ["gift card", "giftcard", "voucher", "egift"],
+        "car": ["car", "truck", "suv", "vehicle", "lease"],
+        "home": ["home", "renovation", "furniture", "appliance", "grill", "bbq", "patio"],
+        "fashion": ["clothing", "shoes", "bag", "jacket", "dress", "outfit", "wardrobe", "sneakers", "watch"],
+        "sports": ["ticket", "game", "hockey", "basketball", "football", "jersey", "signed", "memorabilia"],
+        "food_drink": ["food", "drink", "coffee", "pizza", "beer", "wine", "restaurant", "grocery"],
+    }
+    for cat, kws in cat_keywords.items():
+        for kw in kws:
+            if kw in text_lower:
+                return cat
+    return "other"
+
+
+def scrape_contest_canada() -> list[dict]:
+    """Scrape https://contestcanada.net/ for contest listings."""
+    offers = []
+    logger.info("Scraping Contest Canada...")
+
+    resp = _fetch(CONTEST_CANADA)
+    if not resp:
+        return offers
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    articles = soup.find_all("article") or soup.find_all("div", class_=re.compile(r"post|entry|card|item|contest", re.I))
+    if not articles:
+        articles = soup.find_all("a", href=re.compile(r"/(?:20\d{2}|contest|sweepstake|giveaway)/", re.I))
+
+    seen_urls = set()
+    for article in articles[:30]:
+        try:
+            title_elem = article.find(["h1", "h2", "h3", "h4"]) or article.find("a", class_=re.compile(r"title|heading", re.I))
+            if not title_elem:
+                title_elem = article.find("a", href=True)
+
+            title = _clean_text(title_elem.get_text() if title_elem else "")
+            link = None
+            if title_elem and title_elem.get("href"):
+                link = title_elem["href"]
+            elif title_elem:
+                a_tag = title_elem.find("a")
+                link = a_tag["href"] if a_tag and a_tag.get("href") else None
+
+            if not link:
+                continue
+            link = urljoin(CONTEST_CANADA, link)
+            if link in seen_urls:
+                continue
+            seen_urls.add(link)
+
+            desc_elem = article.find("div", class_=re.compile(r"excerpt|content|summary|desc|entry", re.I))
+            description = _clean_text(desc_elem.get_text() if desc_elem else "")
+
+            full_text = f"{title} {description}"
+            category = _infer_contest_category(full_text)
+            region = _infer_region(full_text)
+            value = _extract_value(full_text)
+
+            if not title:
+                continue
+
+            offers.append({
+                "source": "contestcanada.net",
+                "url": link,
+                "title": title[:200],
+                "description": description[:500],
+                "category": category,
+                "region": region if region != "unknown" else "Canada",
+                "value_estimate": value,
+                "offer_type": "contest",
+            })
+        except Exception as e:
+            logger.debug(f"Error parsing article from contestcanada.net: {e}")
+            continue
+
+    logger.info(f"Found {len(offers)} contests from contestcanada.net")
+    return offers
+
+
+def scrape_sweepstakes_ca() -> list[dict]:
+    """Scrape https://sweepstakes.ca/ for contest listings."""
+    offers = []
+    logger.info("Scraping Sweepstakes.ca...")
+
+    resp = _fetch(SWEEPSTAKES_CA)
+    if not resp:
+        return offers
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    articles = soup.find_all("article") or soup.find_all("div", class_=re.compile(r"post|entry|card|item|contest|listing", re.I))
+    if not articles:
+        articles = soup.find_all("a", href=re.compile(r"/contest|/sweepstake|/giveaway", re.I))
+
+    seen_urls = set()
+    for article in articles[:30]:
+        try:
+            title_elem = article.find(["h1", "h2", "h3", "h4"]) or article.find("a")
+            title = _clean_text(title_elem.get_text() if title_elem else "")
+
+            link = None
+            if title_elem and title_elem.get("href"):
+                link = title_elem["href"]
+            elif title_elem:
+                a_tag = title_elem.find("a")
+                link = a_tag["href"] if a_tag and a_tag.get("href") else None
+
+            if not link:
+                continue
+            link = urljoin(SWEEPSTAKES_CA, link)
+            if link in seen_urls:
+                continue
+            seen_urls.add(link)
+
+            desc_elem = article.find("div", class_=re.compile(r"excerpt|content|summary|desc", re.I))
+            description = _clean_text(desc_elem.get_text() if desc_elem else "")
+
+            full_text = f"{title} {description}"
+            category = _infer_contest_category(full_text)
+            region = _infer_region(full_text)
+            value = _extract_value(full_text)
+
+            if not title:
+                continue
+
+            offers.append({
+                "source": "sweepstakes.ca",
+                "url": link,
+                "title": title[:200],
+                "description": description[:500],
+                "category": category,
+                "region": region if region != "unknown" else "Canada",
+                "value_estimate": value,
+                "offer_type": "contest",
+            })
+        except Exception as e:
+            logger.debug(f"Error parsing article from sweepstakes.ca: {e}")
+            continue
+
+    logger.info(f"Found {len(offers)} contests from sweepstakes.ca")
+    return offers
+
+
+def scrape_canadian_contests_reddit() -> list[dict]:
+    """Scrape r/CanadianContests via old.reddit.com JSON API.
+
+    Falls back to parsing the HTML page if JSON returns 500s.
+    """
+    offers = []
+    logger.info("Scraping r/CanadianContests...")
+
+    resp = _fetch(REDDIT_CANADIAN_CONTESTS)
+    if not resp:
+        return offers
+
+    try:
+        data = resp.json()
+        posts = data.get("data", {}).get("children", [])
+        for post_data in posts[:30]:
+            try:
+                post = post_data.get("data", {})
+                title = _clean_text(post.get("title", ""))
+                selftext = _clean_text(post.get("selftext", ""))
+                permalink = post.get("permalink", "")
+                post_url = post.get("url", "")
+                score = post.get("score", 0)
+
+                if post.get("stickied") or score < 1:
+                    continue
+
+                full_text = f"{title} {selftext}"
+                category = _infer_contest_category(full_text)
+                region = _infer_region(full_text)
+                value = _extract_value(full_text)
+
+                canonical = f"https://www.reddit.com{permalink}" if permalink else post_url
+
+                offers.append({
+                    "source": "reddit.com/r/CanadianContests",
+                    "url": canonical,
+                    "title": title[:200],
+                    "description": (selftext or post_url)[:500],
+                    "category": category,
+                    "region": region if region != "unknown" else "Canada",
+                    "value_estimate": value,
+                    "offer_type": "contest",
+                })
+            except Exception as e:
+                logger.debug(f"Error parsing Reddit contest post: {e}")
+                continue
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Reddit JSON failed ({e}), falling back to HTML parsing...")
+        resp2 = _fetch("https://old.reddit.com/r/CanadianContests/new/")
+        if resp2:
+            soup = BeautifulSoup(resp2.text, "html.parser")
+            entries = soup.find_all("div", class_="thing")
+            seen_urls = set()
+            for entry in entries[:30]:
+                try:
+                    title_elem = entry.find("a", class_="title")
+                    if not title_elem:
+                        continue
+                    title = _clean_text(title_elem.get_text())
+                    link = title_elem.get("href", "")
+                    if not link or link in seen_urls:
+                        continue
+                    seen_urls.add(link)
+                    if link.startswith("/r/"):
+                        link = "https://old.reddit.com" + link
+
+                    full_text = f"{title}"
+                    category = _infer_contest_category(full_text)
+                    value = _extract_value(full_text)
+
+                    offers.append({
+                        "source": "reddit.com/r/CanadianContests",
+                        "url": link,
+                        "title": title[:200],
+                        "description": "",
+                        "category": category,
+                        "region": "Canada",
+                        "value_estimate": value,
+                        "offer_type": "contest",
+                    })
+                except Exception as ex:
+                    logger.debug(f"Error parsing Reddit HTML entry: {ex}")
+                    continue
+
+    logger.info(f"Found {len(offers)} contests from r/CanadianContests")
+    return offers
+
+
+def scrape_sweepstakes_advantage() -> list[dict]:
+    """Scrape sweepstakesadvantage.com - gracefully returns empty if blocked."""
+    logger.info("Scraping Sweepstakes Advantage...")
+
+    resp = _fetch(SWEEPSTAKES_ADVANTAGE)
+    if not resp:
+        logger.debug("Sweepstakes Advantage returned no response (likely blocked or login wall)")
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    page_text = soup.get_text().lower()
+    if any(phrase in page_text for phrase in ["access denied", "log in to continue", "please sign in", "you must be logged in"]):
+        logger.debug("Sweepstakes Advantage: login wall detected, skipping")
+        return []
+
+    offers = []
+    seen_urls = set()
+
+    articles = soup.find_all("div", class_=re.compile(r"sweepstake|listing|contest|item|card", re.I))
+    for article in articles[:30]:
+        try:
+            title_elem = article.find(["h1", "h2", "h3", "h4", "a"])
+            title = _clean_text(title_elem.get_text() if title_elem else "")
+            link = title_elem.get("href") if title_elem else None
+            if not link:
+                continue
+            link = urljoin(SWEEPSTAKES_ADVANTAGE, link)
+            if link in seen_urls:
+                continue
+            seen_urls.add(link)
+
+            full_text = f"{title}"
+            category = _infer_contest_category(full_text)
+            value = _extract_value(full_text)
+
+            offers.append({
+                "source": "sweepstakesadvantage.com",
+                "url": link,
+                "title": title[:200],
+                "description": "",
+                "category": category,
+                "region": "unknown",
+                "value_estimate": value,
+                "offer_type": "contest",
+            })
+        except Exception as e:
+            logger.debug(f"Error parsing sweepstakesadvantage: {e}")
+            continue
+
+    logger.info(f"Found {len(offers)} contests from sweepstakesadvantage.com")
+    return offers
+
+
 # --- Main scraper orchestrator ---
 
 ALL_SCRAPERS = [
@@ -442,18 +746,39 @@ ALL_SCRAPERS = [
     ("slickdeals", scrape_slickdeals),
 ]
 
+CONTEST_SCRAPERS = [
+    ("contest_canada", scrape_contest_canada),
+    ("sweepstakes_ca", scrape_sweepstakes_ca),
+    ("reddit_canadian_contests", scrape_canadian_contests_reddit),
+    ("sweepstakes_advantage", scrape_sweepstakes_advantage),
+]
 
-def scrape_all(sources: list[str] = None) -> list[dict]:
+_SOURCE_MAP = dict(ALL_SCRAPERS + CONTEST_SCRAPERS)
+
+
+def scrape_all(sources: list[str] = None, offer_type: str = "all") -> list[dict]:
     """Run all configured scrapers and return combined results.
 
     Args:
         sources: Optional list of source keys to scrape. If None, scrape all.
                  Valid keys: canadian_free_stuff, freebies_canada,
-                 reddit_freebies_canada, reddit_freebies, slickdeals
+                 reddit_freebies_canada, reddit_freebies, slickdeals,
+                 contest_canada, sweepstakes_ca, reddit_canadian_contests,
+                 sweepstakes_advantage
+        offer_type: 'freebie', 'contest', or 'all' (default). Determines
+                    which set of scrapers to run.
     """
+    # Determine which scrapers to run
+    if offer_type == "freebie":
+        scrapers_to_run = ALL_SCRAPERS
+    elif offer_type == "contest":
+        scrapers_to_run = CONTEST_SCRAPERS
+    else:  # "all"
+        scrapers_to_run = ALL_SCRAPERS + CONTEST_SCRAPERS
+
     all_offers = []
 
-    for source_key, scraper_fn in ALL_SCRAPERS:
+    for source_key, scraper_fn in scrapers_to_run:
         if sources and source_key not in sources:
             continue
         try:
@@ -475,5 +800,5 @@ def scrape_all(sources: list[str] = None) -> list[dict]:
             seen.add(offer["url"])
             unique.append(offer)
 
-    logger.info(f"Total unique offers across all sources: {len(unique)}")
+    logger.info(f"Total unique offers across all sources (type={offer_type}): {len(unique)}")
     return unique
