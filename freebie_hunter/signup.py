@@ -389,6 +389,7 @@ def signup_offer(
     profile: dict = None,
     dry_run: bool = False,
     email_type: str = "disposable",
+    interactive: bool = False,
 ) -> dict:
     """Attempt to sign up for an offer using Playwright.
 
@@ -399,6 +400,8 @@ def signup_offer(
         profile: Dict with profile data. If None, uses config.PROFILE.
         dry_run: If True, don't actually submit.
         email_type: 'disposable' (Guerrilla Mail) or 'persistent' (CONTEST_EMAIL).
+        interactive: If True, launches VISIBLE browser and pauses for user to solve
+                     CAPTCHAs manually, then continues.
 
     Returns:
         Dict with: success, email_used, captcha_detected, error, confirmation_text
@@ -433,14 +436,22 @@ def signup_offer(
                 result["error"] = f"Failed to generate email: {e}"
                 return result
 
+    headless = not interactive
+    if interactive:
+        print(f"\n🖥️  Launching VISIBLE browser for interactive signup...")
+        print(f"   URL: {offer_url}")
+        print(f"   Email: {email_address}")
+        print(f"   Profile: {profile.get('name')}, {profile.get('city')} {profile.get('province')}")
+        print(f"   All form fields will be auto-filled. Just solve any CAPTCHA when prompted.\n")
+
     logger.info(f"Attempting signup for: {offer_url}")
-    logger.info(f"Using email: {email_address}")
+    logger.info(f"Using email: {email_address} (interactive={interactive})")
     if dry_run:
         logger.info("DRY RUN: Will not submit form")
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=headless)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
@@ -453,15 +464,29 @@ def signup_offer(
             # Two-hop routing: if we landed on an aggregator/blog page, find the real signup URL
             resolved = _resolve_actual_form_url(page, offer_url)
             if resolved:
+                logger.info(f"Following real signup link...")
                 page.goto(resolved, wait_until="domcontentloaded", timeout=30000)
                 time.sleep(2)
 
             # Check for CAPTCHA
-            if _detect_captcha(page):
-                logger.warning("CAPTCHA detected, skipping signup")
-                result["captcha_detected"] = True
-                browser.close()
-                return result
+            has_captcha = _detect_captcha(page)
+            if has_captcha:
+                if interactive:
+                    print("\n🔒 CAPTCHA DETECTED — solve it in the browser window now.")
+                    print("   After solving, press Enter here to continue...")
+                    input()
+                    # Re-check: did they solve it?
+                    time.sleep(1)
+                    if _detect_captcha(page):
+                        print("⚠️  CAPTCHA still detected. Press Enter to try again, or Ctrl+C to skip.")
+                        input()
+                    logger.info("Continuing after CAPTCHA...")
+                    result["captcha_detected"] = False  # User handled it
+                else:
+                    logger.warning("CAPTCHA detected, skipping signup")
+                    result["captcha_detected"] = True
+                    browser.close()
+                    return result
 
             # Detect required fields
             required = _detect_required_fields(page)
@@ -478,11 +503,9 @@ def signup_offer(
 
             # Name
             if profile.get("name"):
-                # Try full name first
                 if _fill_field(page, FIELD_PATTERNS["full_name"], profile["name"]):
                     field_fill_count += 1
                 else:
-                    # Try first + last separately
                     name_parts = profile["name"].rsplit(" ", 1)
                     if len(name_parts) == 2:
                         if _fill_field(page, FIELD_PATTERNS["first_name"], name_parts[0]):
@@ -502,7 +525,7 @@ def signup_offer(
                 if _fill_field(page, FIELD_PATTERNS["city"], profile["city"]):
                     field_fill_count += 1
 
-            # Province/State (try both text and select)
+            # Province/State
             if profile.get("province"):
                 _fill_field(page, FIELD_PATTERNS["province"], profile["province"])
 
@@ -520,8 +543,10 @@ def signup_offer(
                 _fill_field(page, FIELD_PATTERNS["phone"], profile["phone"])
 
             logger.info(f"Filled {field_fill_count} fields")
+            if interactive and field_fill_count > 0:
+                print(f"   ✅ Filled {field_fill_count} form fields automatically")
 
-            # Attempt to solve any skill-testing question (Canadian law requirement for contests)
+            # Attempt to solve any skill-testing question
             stq_solved = solve_stq(page)
             if stq_solved:
                 logger.info("Skill-testing question handled")
@@ -530,15 +555,22 @@ def signup_offer(
             if not dry_run:
                 submit_btn = _detect_submit_button(page)
                 if submit_btn:
-                    # Re-check for CAPTCHA (sometimes loads after filling)
+                    # Re-check for CAPTCHA
                     if _detect_captcha(page):
-                        logger.warning("CAPTCHA appeared after form fill, skipping")
-                        result["captcha_detected"] = True
-                        browser.close()
-                        return result
+                        if interactive:
+                            print("\n🔒 CAPTCHA appeared after filling — solve it then press Enter...")
+                            input()
+                            time.sleep(1)
+                        else:
+                            logger.warning("CAPTCHA appeared after form fill, skipping")
+                            result["captcha_detected"] = True
+                            browser.close()
+                            return result
 
+                    if interactive:
+                        print("   📤 Submitting form...")
                     submit_btn.click()
-                    time.sleep(3)  # Wait for submission
+                    time.sleep(4)
 
                     # Check for confirmation
                     page_text = page.content().lower()
@@ -556,14 +588,42 @@ def signup_offer(
                         result["confirmation_text"] = page.locator("body").text_content()[:500] or ""
                     except Exception:
                         result["confirmation_text"] = page.content()[:500]
+                    
+                    if interactive:
+                        if result["success"]:
+                            print(f"   ✅ Signup successful!")
+                        else:
+                            print(f"   ⚠️  Form submitted but couldn't confirm success — check the browser")
+                            # Give user time to review
+                            print("   Press Enter when done reviewing the page...")
+                            input()
+                    
                     logger.info(f"Signup submitted, success={result['success']}")
                 else:
                     result["error"] = "Could not find submit button"
                     logger.warning("No submit button found")
+                    if interactive:
+                        print(f"   ⚠️  No submit button found — you may need to click it manually")
+                        print("   Press Enter when done...")
+                        input()
+                        # Try to confirm success after manual submit
+                        try:
+                            page_text = page.content().lower()
+                            for kw in confirmation_keywords:
+                                if kw in page_text:
+                                    result["success"] = True
+                                    result["error"] = None
+                                    break
+                        except Exception:
+                            pass
             else:
                 logger.info("DRY RUN: Skipped form submission")
-                result["success"] = True  # Dry run always "succeeds"
+                result["success"] = True
 
+            if interactive:
+                print(f"   🖥️  Browser closing in 3 seconds...")
+                time.sleep(3)
+            
             browser.close()
 
     except ImportError:

@@ -141,6 +141,7 @@ def cmd_claim(args) -> int:
         email_address=args.email if hasattr(args, 'email') and args.email else None,
         dry_run=args.dry_run,
         email_type=email_type,
+        interactive=args.manual if hasattr(args, 'manual') else False,
     )
 
     if result["success"]:
@@ -148,7 +149,7 @@ def cmd_claim(args) -> int:
         console.print(f"[green]✅ Signup successful! Email: {result.get('email_used', 'N/A')}[/green]")
     elif result.get("captcha_detected"):
         status = "captcha_blocked"
-        console.print("[magenta]🔒 CAPTCHA blocked — requires manual claiming[/magenta]")
+        console.print("[magenta]🔒 CAPTCHA blocked — try 'claim ID --manual' for interactive mode[/magenta]")
     else:
         status = "rejected"
         console.print(f"[red]❌ Claim failed: {result.get('error', 'Unknown error')}[/red]")
@@ -488,6 +489,7 @@ Examples:
     claim_parser.add_argument("id", type=int, help="Offer ID to claim")
     claim_parser.add_argument("--dry-run", action="store_true", help="Don't actually submit forms")
     claim_parser.add_argument("--email", type=str, help="Email to use (generates one if not provided)")
+    claim_parser.add_argument("--manual", action="store_true", help="Interactive mode: visible browser, pause for CAPTCHA solving")
     claim_parser.add_argument("--type", type=str, default="all", choices=["freebie", "contest", "all"],
                             help="Offer type context (default: all)")
 
