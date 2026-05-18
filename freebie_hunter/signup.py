@@ -95,33 +95,53 @@ def _fill_field(page, patterns: list[str], value: str) -> bool:
 
 
 def _detect_captcha(page) -> bool:
-    """Detect if a CAPTCHA is present on the page.
+    """Detect if a CAPTCHA is actually rendered on the page.
 
-    Returns True if CAPTCHA detected.
+    Returns True only if a real CAPTCHA widget is present (not just JS code references).
     """
-    captcha_indicators = [
-        "captcha",
-        "recaptcha",
-        "hcaptcha",
-        "g-recaptcha",
-        "i am not a robot",
-        "verify you are human",
-        "are you a human",
-        "cloudflare",
-        "challenge",
-        "turnstile",
-    ]
-
     try:
-        page_text = page.content().lower()
-        for indicator in captcha_indicators:
-            if indicator in page_text:
-                return True
-
-        # Check for iframes with captcha
-        iframes = page.locator("iframe[src*='captcha'], iframe[src*='recaptcha'], iframe[src*='hcaptcha']")
-        if iframes.count() > 0:
+        # Check for actual visible CAPTCHA elements (not just JS source mentions)
+        # 1. reCAPTCHA iframe — the real widget renders an iframe with specific src
+        recaptcha_frames = page.locator("iframe[src*='recaptcha']")
+        if recaptcha_frames.count() > 0:
+            logger.debug("reCAPTCHA iframe detected")
             return True
+
+        # 2. hCaptcha iframe
+        hcaptcha_frames = page.locator("iframe[src*='hcaptcha']")
+        if hcaptcha_frames.count() > 0:
+            logger.debug("hCaptcha iframe detected")
+            return True
+
+        # 3. Cloudflare Turnstile iframe
+        turnstile_frames = page.locator("iframe[src*='turnstile']")
+        if turnstile_frames.count() > 0:
+            logger.debug("Turnstile iframe detected")
+            return True
+
+        # 4. The actual g-recaptcha div (the widget placeholder)
+        g_recaptcha_div = page.locator("div.g-recaptcha")
+        if g_recaptcha_div.count() > 0:
+            logger.debug("g-recaptcha div detected")
+            return True
+
+        # 5. h-captcha div
+        hcaptcha_div = page.locator("div.h-captcha")
+        if hcaptcha_div.count() > 0:
+            logger.debug("h-captcha div detected")
+            return True
+
+        # 6. Visible "I am not a robot" text (only in visible elements)
+        visible_text = page.locator("body").inner_text().lower() if page.locator("body").count() > 0 else ""
+        captcha_phrases = [
+            "i am not a robot",
+            "verify you are human",
+            "are you a human",
+        ]
+        for phrase in captcha_phrases:
+            if phrase in visible_text:
+                logger.debug(f"CAPTCHA phrase detected in visible text: {phrase}")
+                return True
 
     except Exception:
         pass
@@ -292,6 +312,77 @@ def solve_stq(page) -> bool:
     return True  # We found and solved the math, even if filling failed
 
 
+def _resolve_actual_form_url(page, offer_url: str) -> Optional[str]:
+    """If we landed on an aggregator blog post, find the actual signup link.
+    
+    Returns the real form URL if found, None to keep current page.
+    """
+    import requests as req_lib
+    from bs4 import BeautifulSoup as BS
+    
+    page_text = page.content().lower()
+    page_html = page.content()
+    
+    # Quick check: does this page have actual form inputs? (Not just search/email)
+    # Count inputs that look like real form fields (name, address, etc.) — not just email
+    text_inputs = page.locator(
+        "input:not([type='hidden']):not([type='submit']):not([type='search']):not([type='email'])"
+    )
+    # If there are 2+ non-email inputs, we're probably on a real form
+    if text_inputs.count() >= 2: 
+        return None
+    
+    # No forms found — this is likely an aggregator page. Find real links.
+    logger.info(f"No signup form on page, searching for actual offer link...")
+    
+    # Strategy: find external links that look like signup forms
+    soup = BS(page_html, 'html.parser')
+    candidate_links = []
+    
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag['href']
+        link_text = (a_tag.get_text() or '').strip().lower()
+        
+        # Score links by how likely they are to be the real signup
+        score = 0
+        target_keywords = ['signup', 'register', 'enter', 'form', 'survey', 'apply',
+                          'submit', 'claim', 'get free', 'contest', 'giveaway', 'sweepstakes',
+                          'butterly', 'gleam', 'woobox', 'rafflecopter', 'promosimple']
+        
+        for kw in target_keywords:
+            if kw in href.lower():
+                score += 10
+            if kw in link_text:
+                score += 8
+        
+        # External links are more likely
+        if href.startswith('http'):
+            score += 5
+        
+        # Filter out navigation/internal links
+        skip_domains = ['canadianfreestuff.com', 'freebiescanada.com', 'contestcanada.net',
+                        'sweepstakes.ca', 'reddit.com', 'old.reddit.com', 'facebook.com',
+                        'twitter.com', 'instagram.com', 'pinterest.com', 'youtube.com']
+        if any(d in href for d in skip_domains) and not any(t in href.lower() for t in ['butterly', 'gleam', 'woobox']):
+            score -= 20
+        
+        if score > 15:
+            candidate_links.append((score, href))
+    
+    if candidate_links:
+        candidate_links.sort(reverse=True)
+        best_link = candidate_links[0][1]
+        # Make absolute if relative
+        if not best_link.startswith('http'):
+            from urllib.parse import urljoin
+            best_link = urljoin(offer_url, best_link)
+        logger.info(f"Resolved actual form URL ({candidate_links[0][0]}pts): {best_link[:100]}")
+        return best_link
+    
+    logger.warning("No signup link found on aggregator page")
+    return None
+
+
 def signup_offer(
     offer_url: str,
     email_address: str = None,
@@ -358,6 +449,12 @@ def signup_offer(
             # Navigate to offer
             page.goto(offer_url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(2)  # Let any JS load
+
+            # Two-hop routing: if we landed on an aggregator/blog page, find the real signup URL
+            resolved = _resolve_actual_form_url(page, offer_url)
+            if resolved:
+                page.goto(resolved, wait_until="domcontentloaded", timeout=30000)
+                time.sleep(2)
 
             # Check for CAPTCHA
             if _detect_captcha(page):
@@ -455,7 +552,10 @@ def signup_offer(
                             result["success"] = True
                             break
 
-                    result["confirmation_text"] = page.text_content()[:500]
+                    try:
+                        result["confirmation_text"] = page.locator("body").text_content()[:500] or ""
+                    except Exception:
+                        result["confirmation_text"] = page.content()[:500]
                     logger.info(f"Signup submitted, success={result['success']}")
                 else:
                     result["error"] = "Could not find submit button"

@@ -132,18 +132,22 @@ def cmd_claim(args) -> int:
     if args.dry_run:
         console.print("[yellow]DRY RUN MODE - will not actually submit[/yellow]")
 
+    # Determine email type based on offer type
+    email_type = "persistent" if offer.get("offer_type") == "contest" else "disposable"
+
     result = signup_offer(
         offer_url=offer["url"],
         email_address=args.email if hasattr(args, 'email') and args.email else None,
         dry_run=args.dry_run,
+        email_type=email_type,
     )
 
     if result["success"]:
         status = "claimed"
         console.print(f"[green]✅ Signup successful! Email: {result.get('email_used', 'N/A')}[/green]")
     elif result.get("captcha_detected"):
-        status = "new"  # Leave as new so we can try manually
-        console.print("[yellow]⚠️  CAPTCHA detected - please claim this one manually.[/yellow]")
+        status = "captcha_blocked"
+        console.print("[magenta]🔒 CAPTCHA blocked — requires manual claiming[/magenta]")
     else:
         status = "rejected"
         console.print(f"[red]❌ Claim failed: {result.get('error', 'Unknown error')}[/red]")
@@ -158,7 +162,8 @@ def cmd_claim(args) -> int:
     if result.get("confirmation_text"):
         console.print(f"[dim]Confirmation: {result['confirmation_text'][:200]}...[/dim]")
 
-    return 0 if result["success"] else 1
+    # CAPTCHA is not an error — return 0 for both success and captcha_blocked
+    return 0 if (result["success"] or result.get("captcha_detected")) else 1
 
 
 def cmd_full(args) -> int:
@@ -190,25 +195,33 @@ def cmd_full(args) -> int:
 
     # Step 2: Select top offers for auto-claim
     console.print(f"\n[bold]Step 2/3: Auto-claiming top offers...[/bold]")
-    top_offers = new_offers[:args.limit] if hasattr(args, 'limit') and args.limit else new_offers[:5]
+    limit = args.limit if hasattr(args, 'limit') and args.limit else 5
+    top_offers = new_offers[:limit]
 
-    claimed = 0
+    claimed_count = 0
+    captcha_count = 0
+    failed_count = 0
     for i, offer in enumerate(top_offers, 1):
         console.print(f"\n  Claiming [{i}/{len(top_offers)}]: {offer['title'][:80]}...")
+        # Determine email type based on offer type
+        email_type = "persistent" if offer.get("offer_type") == "contest" else "disposable"
         result = signup_offer(
             offer_url=offer["url"],
             dry_run=args.dry_run,
+            email_type=email_type,
         )
 
         if result["success"]:
             status = "claimed"
-            claimed += 1
+            claimed_count += 1
             console.print(f"    [green]✅ Claimed! {result.get('email_used', '')}[/green]")
         elif result.get("captcha_detected"):
-            status = "new"
-            console.print(f"    [yellow]⚠️  CAPTCHA - manual claim needed[/yellow]")
+            status = "captcha_blocked"
+            captcha_count += 1
+            console.print(f"    [magenta]🔒 CAPTCHA blocked — requires manual claiming[/magenta]")
         else:
             status = "rejected"
+            failed_count += 1
             console.print(f"    [red]❌ Failed: {result.get('error', 'Unknown')}[/red]")
 
         update_offer_status(
@@ -220,10 +233,65 @@ def cmd_full(args) -> int:
 
     # Step 3: Summary
     console.print(f"\n[bold]Step 3/3: Summary[/bold]")
-    console.print(f"  📊 Scanned: {len(filtered)} | New: {new_count} | Claimed: {claimed}")
+    console.print(f"  📊 Scanned: {len(filtered)} | New: {new_count}")
+    console.print(f"  ✅ Auto-claimed: {claimed_count} | 🔒 Manual needed: {captcha_count} | ❌ Failed: {failed_count}")
     stats = get_stats()
     console.print(f"  💾 Total in database: {stats['total']}")
 
+    return 0
+
+
+def cmd_claim_pending(args) -> int:
+    """Claim all pending (status='new') offers, skipping CAPTCHA ones."""
+    from rich.console import Console
+
+    console = Console()
+    logger = logging.getLogger(__name__)
+
+    pending = get_offers(status="new", limit=args.limit if hasattr(args, 'limit') and args.limit else 50)
+    if not pending:
+        console.print("[yellow]No pending offers to claim.[/yellow]")
+        return 0
+
+    console.print(f"[bold]🔍 Found {len(pending)} pending offers[/bold]\n")
+
+    claimed_count = 0
+    captcha_count = 0
+    failed_count = 0
+
+    for i, offer in enumerate(pending, 1):
+        console.print(f"\n  [{i}/{len(pending)}] {offer['title'][:80]}...")
+        console.print(f"  [dim]URL: {offer['url']}[/dim]")
+
+        email_type = "persistent" if offer.get("offer_type") == "contest" else "disposable"
+        result = signup_offer(
+            offer_url=offer["url"],
+            dry_run=False,
+            email_type=email_type,
+        )
+
+        if result["success"]:
+            status = "claimed"
+            claimed_count += 1
+            console.print(f"    [green]✅ Claimed! {result.get('email_used', '')}[/green]")
+        elif result.get("captcha_detected"):
+            status = "captcha_blocked"
+            captcha_count += 1
+            console.print(f"    [magenta]🔒 CAPTCHA blocked — requires manual claiming[/magenta]")
+        else:
+            status = "rejected"
+            failed_count += 1
+            console.print(f"    [red]❌ Failed: {result.get('error', 'Unknown')}[/red]")
+
+        update_offer_status(
+            offer_id=offer["id"],
+            status=status,
+            email_used=result.get("email_used"),
+            notes=result.get("error", ""),
+        )
+
+    console.print(f"\n[bold]📊 Claim-Pending Summary[/bold]")
+    console.print(f"  ✅ Auto-claimed: {claimed_count} | 🔒 Manual needed: {captcha_count} | ❌ Failed: {failed_count}")
     return 0
 
 
@@ -316,6 +384,7 @@ Examples:
   freebie-hunter claim 5            Claim offer ID 5
   freebie-hunter claim 5 --dry-run  Test claim without submitting
   freebie-hunter full               Full scan + auto-claim pipeline
+  freebie-hunter claim-pending      Claim all new offers (skips CAPTCHA)
   freebie-hunter stats              Show database stats
   freebie-hunter list               List all offers
   freebie-hunter list --status new  List new offers only
@@ -358,7 +427,7 @@ Examples:
 
     # list
     list_parser = subparsers.add_parser("list", help="List offers from database")
-    list_parser.add_argument("--status", type=str, help="Filter by status (new, claimed, shipped, expired, rejected)")
+    list_parser.add_argument("--status", type=str, help="Filter by status (new, claimed, shipped, expired, rejected, captcha_blocked)")
     list_parser.add_argument("--limit", type=int, default=50, help="Max offers to show (default: 50)")
     list_parser.add_argument("--json", action="store_true", help="Output as JSON")
     list_parser.add_argument("--type", type=str, default="all", choices=["freebie", "contest", "all"],
@@ -370,6 +439,10 @@ Examples:
 
     # test-email
     subparsers.add_parser("test-email", help="Test Guerrilla Mail integration")
+
+    # claim-pending
+    claim_pending_parser = subparsers.add_parser("claim-pending", help="Claim all pending (new) offers, skipping CAPTCHA")
+    claim_pending_parser.add_argument("--limit", type=int, default=50, help="Max offers to claim (default: 50)")
 
     args = parser.parse_args()
 
@@ -392,6 +465,7 @@ Examples:
         "scan": cmd_scan,
         "claim": cmd_claim,
         "full": cmd_full,
+        "claim-pending": cmd_claim_pending,
         "stats": cmd_stats,
         "list": cmd_list,
         "show": cmd_show,

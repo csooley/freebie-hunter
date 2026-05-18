@@ -17,6 +17,7 @@ STATUS_STYLES = {
     "shipped": "green",
     "expired": "red",
     "rejected": "grey",
+    "captcha_blocked": "magenta",
 }
 
 # Category emojis
@@ -42,6 +43,7 @@ def _status_emoji(status: str) -> str:
         "shipped": "🚚",
         "expired": "⏰",
         "rejected": "❌",
+        "captcha_blocked": "🔒",
     }
     return emoji_map.get(status, "❓")
 
