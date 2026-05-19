@@ -64,11 +64,97 @@ def score_offer(offer: dict) -> int:
     - Cash prizes: base score from dollar amount
     - Daily entry: +15 bonus
     - Weekly entry: +10 bonus
+
+    Direct-search results get stricter scoring — must have brand/URL/snippet
+    signals to pass, otherwise scored -50 to fall below min_score threshold.
     """
     offer_type = offer.get("offer_type", "freebie")
+    source = offer.get("source", "")
     score = 0
     region = (offer.get("region") or "").lower()
     text = f"{(offer.get('title') or '').lower()} {(offer.get('description') or '').lower()}"
+
+    # ------------------------------------------------------------------
+    # Fix 3: Stricter scoring for DDG search results (source="direct_search")
+    # ------------------------------------------------------------------
+    if source == "direct_search":
+        url_lower = (offer.get("url") or "").lower()
+
+        # Known brand/retailer URLs that should NOT be penalized
+        known_brand_urls = [
+            "pggoodeveryday.ca", "laroche-posay.ca", "vichy.ca",
+            "nestlebaby.ca", "enfamil.ca", "similac.ca",
+            "pampers.ca", "huggies.ca", "samplesource.com",
+            "pinchme.com", "topboxcircle.com", "chickadvisor.com",
+            "hometesterclub.com", "bzzagent.com", "influenster.com",
+            "sephora.ca", "shoppersdrugmart.ca", "pharmaprix.ca",
+            "well.ca", "londondrugs.com", "rexall.ca",
+        ]
+        is_known_url = any(brand_url in url_lower for brand_url in known_brand_urls)
+
+        # Aggregator URLs get penalized same as direct_search (they're not
+        # the main concern — they have already-good filtering)
+        is_aggregator = source in ("aggregator", "canadianfreestuff", "freebiescanada")
+
+        if not is_known_url and not is_aggregator:
+            # Must pass at least ONE of these checks
+            passes_strict = False
+
+            # Check 1: Known brand name in title/description
+            known_brands = [
+                "p&g", "nestlé", "nestle", "enfamil", "similac",
+                "pampers", "huggies", "topbox", "top box",
+                "chickadvisor", "chick advisor", "bzzagent",
+                "hometester", "home tester", "pinchme", "pinch me",
+                "samplesource", "sample source", "vichy",
+                "la roche-posay", "la roche posay", "dove", "olay",
+                "garnier", "l'oréal", "loreal", "maybelline",
+                "covergirl", "cover girl", "neutrogena", "aveeno",
+                "cerave", "cetaphil", "clinique", "shiseido",
+                "johnson", "nivea", "vaseline",
+            ]
+            for brand in known_brands:
+                if brand in text:
+                    passes_strict = True
+                    break
+
+            # Check 2: URL path contains sample/signup indicators
+            if not passes_strict:
+                url_path_indicators = [
+                    "/sample", "/free-sample", "/echantillon",
+                    "/try", "/signup", "/sign-up", "/register",
+                    "/freebie", "/rewards", "/sampling",
+                ]
+                for ind in url_path_indicators:
+                    # Match path segments: "/sample" or "/sample/" but not "/sample-info"
+                    if ind in url_lower and (
+                        url_lower.endswith(ind)
+                        or (ind + "/") in url_lower
+                        or (ind + "?") in url_lower
+                        or (ind + "#") in url_lower
+                        or (ind + ".") in url_lower
+                    ):
+                        passes_strict = True
+                        break
+
+            # Check 3: Description explicitly mentions "free" + product type
+            if not passes_strict:
+                free_product_patterns = [
+                    r"\bfree\b.{0,20}\b(sample|product|item|kit|box|trial|coupon)\b",
+                    r"\b(free|gratuit)\b.{0,20}\b(beauty|skincare|makeup|cosmetic|perfume|parfum)\b",
+                    r"\b(free|gratuit)\b.{0,20}\b(baby|diaper|couche|formula|formule)\b",
+                    r"\b(free|gratuit)\b.{0,20}\b(food|coffee|tea|snack|drink)\b",
+                    r"\béchantillon gratuit\b",
+                ]
+                import re as re2
+                for pat in free_product_patterns:
+                    if re2.search(pat, text):
+                        passes_strict = True
+                        break
+
+            if not passes_strict:
+                score = -50
+                return score
 
     # Region scoring
     if region == "canada":
@@ -167,7 +253,43 @@ def filter_low_value(offer: dict) -> bool:
 
     title = (offer.get("title") or "").lower()
     desc = (offer.get("description") or "").lower()
+    source = (offer.get("source") or "").lower()
+    url = (offer.get("url") or "").lower()
+    offer_type = offer.get("offer_type", "freebie")
     text = f"{title} {desc}"
+
+    # --- Fix 3/4: Stronger filtering for search results ---
+    if source == "direct_search":
+        # Reject blog/magazine/how-to content
+        blog_noise = [
+            "how to", "comment ", "voici les", "voici ", "top 10",
+            "magazine", "blog", "article",
+        ]
+        for noise in blog_noise:
+            if noise in text:
+                logger.debug(f"Filtered direct_search (blog/magazine noise): {title[:80]}")
+                return False
+
+        # Reject if URL domain looks like a news/magazine/blog site
+        news_domains = [
+            "cnn.com", "cbc.ca", "globalnews.ca", "ctvnews.ca",
+            "thestar.com", "torontosun.com", "nationalpost.com",
+            "globeandmail.com", "huffpost.com", "buzzfeed.com",
+            "medium.com", "forbes.com", "businessinsider.com",
+            "narcity.com", "mtlblog.com", "curiocity.com",
+            "dailyhive.com", "blogto.com", "todocanada.ca",
+        ]
+        for nd in news_domains:
+            if nd in url:
+                # Only keep if it contains actual signup/sample keywords
+                signup_keywords = [
+                    "sign up", "register", "join", "get your free",
+                    "order sample", "request sample", "claim",
+                ]
+                has_signup = any(sk in text for sk in signup_keywords)
+                if not has_signup:
+                    logger.debug(f"Filtered direct_search (news domain no signup): {title[:80]}")
+                    return False
 
     # --- Explicit KEEP signals (positive indicators) ---
     keep_patterns = [
@@ -183,7 +305,7 @@ def filter_low_value(offer: dict) -> bool:
             return True  # Definitely keep
 
     # --- Contest/sweepstakes: keep if prize seems substantial ---
-    contest_indicators = [r"\\bcontest\\b", r"\\bsweepstakes\\b", r"\\bgiveaway\\b", r"\\benter to win\\b", r"\\bwin\\b"]
+    contest_indicators = [r"\bcontest\b", r"\bsweepstakes\b", r"\bgiveaway\b", r"\benter to win\b", r"\bwin\b"]
     is_contest = offer.get("offer_type") == "contest" or any(re.search(p, text) for p in contest_indicators)
     if is_contest:
         # Contests are always valid — just check it's not complete junk
@@ -193,9 +315,29 @@ def filter_low_value(offer: dict) -> bool:
         return False
 
     # --- Coupon: keep if high-value ---
+    # Fix 4: For freebie-type offers, reject low-value coupons that aren't free samples
     coupon_indicators = [r"\bcoupon\b", r"\bprintable coupon\b", r"\bsave\s*\$\d+", r"\boff coupon\b"]
     is_coupon = any(re.search(p, text) for p in coupon_indicators)
     if is_coupon:
+        # Fix 4: Distinguish coupons from free samples for freebie scan
+        if offer_type == "freebie":
+            # Check if it has "coupon" in title AND a small dollar amount
+            has_coupon_word = "coupon" in title
+            dollar_match = re.search(r"\$(\d+\.?\d*)\s*off\b", text)
+            has_free_product = re.search(
+                r"\bfree\b.{0,30}\b(product|sample|item|perfume|cosmetic|beauty)\b", text
+            ) or re.search(r"\bbogo\b|\bbuy one get one\b|\bfree item\b", text)
+
+            if has_coupon_word and dollar_match and not has_free_product:
+                try:
+                    amount = float(dollar_match.group(1))
+                    if amount < 5:
+                        logger.debug(f"Filtered coupon (<$5 off, no free product): {title[:80]}")
+                        return False
+                except ValueError:
+                    pass
+            # Keep BOGO and free-item-with-purchase — those ARE free products
+
         # Check for free item / BOGO / high-value discount
         high_value_coupon = [
             r"\bfree\b.{0,30}\b(coupon|item|product|sample)\b",

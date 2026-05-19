@@ -116,17 +116,114 @@ ACTIVE_SAMPLE_KEYWORDS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Content relevance filter — rejects noise like exams, insurance, etc.
+# ---------------------------------------------------------------------------
+
+# Keywords that indicate a result is NOT a real free product sample
+_NOISE_FILTER_KEYWORDS = [
+    "exam", "bar exam", "test prep", "practice test", "sample question",
+    "sample letter", "certification", "regulation", "compliance",
+    "standards", "inspection", "tournament", "golf", "track day",
+    "racing", "event registration", "food bank", "charity", "donation",
+    "receive aid", "assistance", "magazine", "blog", "how to get",
+    "comment obtenir", "voici les", "top 10", "software", "download",
+    "télécharger", "app", "tool", "login", "portal",
+    "chamber of commerce", "crop science", "farming", "agriculture",
+    "insurance", "financial", "mortgage", "banking", "credit card",
+    "government", "handbook", "regulation", "policy", "statement",
+    "bus", "transit", "travel advisor", "travel agent", "news", "article",
+    "ontario bar", "lsat", "ielts", "writing sample",
+]
+
+# Keywords/patterns that CONFIRM this is a real free product sample
+_POSITIVE_SAMPLE_KEYWORDS = [
+    "free sample", "échantillon gratuit", "product testing",
+    "try me free", "sample box", "sample program", "free trial size",
+    "free trial set", "free sample box", "free sample kit",
+    "free beauty sample", "free skincare sample", "free perfume sample",
+    "free cosmetic sample", "free baby sample", "free diaper sample",
+    "free formula sample", "free food sample", "free coffee sample",
+]
+
+# Known brand names that are strong positive signals
+_KNOWN_BRANDS = [
+    "p&g", "procter", "gamble", "nestlé", "nestle", "enfamil",
+    "similac", "pampers", "huggies", "topbox", "top box",
+    "chickadvisor", "chick advisor", "bzzagent", "hometester",
+    "home tester", "pinchme", "pinch me", "samplesource", "sample source",
+    "vichy", "la roche-posay", "la roche posay", "dove", "olay",
+    "garnier", "l'oréal", "loreal", "maybelline", "covergirl",
+    "cover girl", "neutrogena", "aveeno", "cerave", "cetaphil",
+    "clinique", "estée lauder", "estee lauder", "lancôme", "lancome",
+    "biotherm", "shiseido", "kiehl", "origins", "clarins",
+    "johnson", "johnson's", "nivea", "vaseline", "ponds", "simple",
+    "burt's bees", "burts bees", "the body shop", "body shop",
+    "lush", "sephora", "shoppers drug mart", "pharmaprix",
+    "rexall", "london drugs", "well.ca",
+]
+
+# URL path endings that strongly indicate a sample offer page
+_POSITIVE_URL_PATTERNS = [
+    "/samples", "/free-sample", "/freebie", "/try", "/sample",
+    "/echantillon", "/freebies", "/free-samples", "/try-me",
+    "/signup", "/sign-up", "/register", "/rewards",
+    "/product-testing", "/tester-club", "/sampling",
+]
+
+
+def _is_actual_free_sample(text: str, url: str = "") -> bool:
+    """Check whether a search result looks like a REAL free product sample.
+
+    Returns True if the text/URL indicates a genuine free sample offer,
+    False if it's noise (exam prep, insurance, government, etc.).
+    """
+    text_lower = text.lower()
+    url_lower = url.lower() if url else ""
+
+    # --- IMMEDIATE REJECT: noise keywords ---
+    for noise_kw in _NOISE_FILTER_KEYWORDS:
+        if noise_kw in text_lower:
+            return False
+
+    # --- POSITIVE SIGNALS ---
+
+    # 1. Known brand names
+    for brand in _KNOWN_BRANDS:
+        if brand in text_lower:
+            return True
+
+    # 2. Positive URL path endings (boundary-aware: match /sample or /sample/ but not /sample-info)
+    for url_pat in _POSITIVE_URL_PATTERNS:
+        if url_pat in url_lower and (
+            url_lower.endswith(url_pat)
+            or (url_pat + "/") in url_lower
+            or (url_pat + "?") in url_lower
+            or (url_pat + "#") in url_lower
+            or (url_pat + ".") in url_lower
+        ):
+            return True
+
+    # 3. Positive keyword combinations
+    for pos_kw in _POSITIVE_SAMPLE_KEYWORDS:
+        if pos_kw in text_lower:
+            return True
+
+    # If we got here: no noise keywords, but also no strong positive signals.
+    # For brand portal checks we're lenient; for search results we're strict.
+    return False
+
+# ---------------------------------------------------------------------------
 # DDG search query templates — bypass aggregator blogs
 # ---------------------------------------------------------------------------
 
 SEARCH_QUERIES = [
-    'site:.ca "sign up" (sample OR échantillon) -blog -review -"best"',
-    'site:.ca "welcome kit" Canada register -blog',
-    'site:.ca "product testing" Canada "sign up" -blog',
-    'site:.ca "free sample" register -blog -review -"top 10" -"best"',
-    'site:.ca échantillon gratuit inscription -blog',
-    'site:.ca "try me free" Canada register',
-    'site:.ca "rewards program" sample OR samples Canada',
+    'site:.ca "free sample" beauty OR skincare OR perfume OR cosmetic sign up -blog -"how to"',
+    'site:.ca "free sample" baby OR diaper OR formula sign up -blog',
+    'site:.ca "échantillon gratuit" parfum OR beauté OR cosmétique OR soin -blog',
+    'site:.ca "product testing" Canada "sign up" panel OR club OR program -blog',
+    'site:.ca "try me free" Canada beauty OR food OR health -blog',
+    'site:.ca "sample box" OR "sample program" Canada sign up',
+    'site:.ca "free trial" product Canada beauty OR skincare OR health -blog',
 ]
 
 DDG_SEARCH_URL = "https://html.duckduckgo.com/html/"
@@ -257,6 +354,14 @@ def check_brand_portals() -> list[dict]:
                 logger.debug(f"Brand portal {portal_key}: no active sample keywords found")
                 continue
 
+            page_text = soup.get_text()
+            page_text_lower = page_text.lower()
+
+            # Content relevance check: page must actually be about free samples
+            if not _is_actual_free_sample(page_text_lower, url):
+                logger.debug(f"Brand portal {portal_key}: relevance check failed — not a free sample page")
+                continue
+
             # Extract title
             title_tag = soup.find("title")
             title = _clean_text(title_tag.get_text()) if title_tag else portal["brands"]
@@ -356,6 +461,12 @@ def run_search_queries() -> list[dict]:
 
                 # Skip if no useful content
                 if not title:
+                    continue
+
+                # Content relevance filter: reject noise (exams, insurance, etc.)
+                full_text = f"{title} {snippet}"
+                if not _is_actual_free_sample(full_text, url):
+                    logger.debug(f"Relevance filter rejected: {title[:80]}")
                     continue
 
                 # Infer metadata from search result
